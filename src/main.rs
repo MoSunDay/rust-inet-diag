@@ -4,7 +4,6 @@ extern crate rustc_serialize;
 #[macro_use]
 extern crate clap;
 
-use std::io::{self, ErrorKind, Cursor};
 use clap::{Arg, App, ArgMatches, AppSettings};
 use rustc_serialize::json::{as_pretty_json};
 use netlink_rs::socket::{Socket, Payload, Msg, NlMsgHeader, NetlinkAddr};
@@ -19,6 +18,9 @@ pub const IPPROTO_TCP: u8 = 6;
 pub const SOCK_DIAG_BY_FAMILY: u16 = 20;
 pub const TCPF_ALL: u32 = 0xFFF;
 pub const NETLINK_INET_DIAG: i32 = 4;
+
+const SIZE: usize = 96;
+const OFFSET: usize = 16;
 
 pub struct SockAddrIn {
     family: u8,
@@ -197,12 +199,22 @@ fn main() {
     let msg = Msg::new(shdr, Payload::Data(&gen_bytes));
     let mut contkr = TcpCon { ..Default::default() };
     nl_sock.send(msg, &nl_sock_addr);
+    
     loop {
-        let (addr, vec) = nl_sock.recv().unwrap();
-        if vec.len() != 0 {
-            parsing(vec, &mut contkr, &matches);
-        } else {
-            break
+        let result = nl_sock.recv();
+        match result {
+            Ok((addr, vec)) => {
+                if vec.len() != 0 {
+                    parsing(vec, &mut contkr, &matches);
+                } else {
+                    break
+                }
+            },
+            Err(error) => {
+                // error handling
+                eprintln!("Error: {}", error);
+                break;
+            },
         }
     }
 }
