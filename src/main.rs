@@ -135,32 +135,41 @@ impl ::std::default::Default for InetDiagMsg {
 
 fn parsing(vec: Vec<Msg>, contkr: &mut TcpCon, matches: &ArgMatches) {
     for reply in vec {
-        if reply.bytes().unwrap().len() == 96 {
-            let bytes: &[u8] = &reply.bytes().unwrap();
-            let data = &bytes[16..96];
-            let msg: InetDiagMsg = bincode::rustc_serialize::decode(data).unwrap();
-            if matches.is_present("connections") {
-                if msg.state != 10 {
-                    println!("{}:{} -> {}:{}", Ipv4Addr::from(msg.id.src.0), msg.id.sport, Ipv4Addr::from(msg.id.dst.0), msg.id.dport);
+        match reply.bytes() {
+            Ok(bytes) => {
+                if bytes.len() != SIZE {
+                    continue;
                 }
-            }
-            if matches.is_present("states") {
-                match msg.state {
-                    1 => contkr.tcp_established += 1,
-                    2 => contkr.tcp_syn_sent += 1,
-                    3 => contkr.tcp_syn_recv += 1,
-                    4 => contkr.tcp_fin_wait1 += 1,
-                    5 => contkr.tcp_fin_wait2 += 1,
-                    6 => contkr.tcp_time_wait += 1,
-                    7 => contkr.tcp_close += 1,
-                    8 => contkr.tcp_close_wait += 1,
-                    9 => contkr.tcp_last_ack += 1,
-                    10 => contkr.tcp_listen += 1,
-                    11 => contkr.tcp_closing += 1,
-                    12 => contkr.tcp_max_states += 1,
-                    _ => println!("here be daemons...")
+                let data = &bytes[OFFSET..SIZE];
+                match bincode::rustc_serialize::decode::<InetDiagMsg>(data) {
+                    Ok(msg) => {
+                        if matches.is_present("connections") {
+                            if msg.state != 10 {
+                                println!("{}:{} -> {}:{}", Ipv4Addr::from(msg.id.src.0), msg.id.sport, Ipv4Addr::from(msg.id.dst.0), msg.id.dport);
+                            }
+                        }
+                        if matches.is_present("states") {
+                            match msg.state {
+                                1 => contkr.tcp_established += 1,
+                                2 => contkr.tcp_syn_sent += 1,
+                                3 => contkr.tcp_syn_recv += 1,
+                                4 => contkr.tcp_fin_wait1 += 1,
+                                5 => contkr.tcp_fin_wait2 += 1,
+                                6 => contkr.tcp_time_wait += 1,
+                                7 => contkr.tcp_close += 1,
+                                8 => contkr.tcp_close_wait += 1,
+                                9 => contkr.tcp_last_ack += 1,
+                                10 => contkr.tcp_listen += 1,
+                                11 => contkr.tcp_closing += 1,
+                                12 => contkr.tcp_max_states += 1,
+                                _ => println!("here be daemons...")
+                            }
+                        }
+                    },
+                    Err(e) => eprintln!("An error occurred while decoding: {}", e),
                 }
-            }
+            },
+            Err(e) => eprintln!("An error occurred while getting bytes: {}", e),
         }
     }
     if matches.is_present("states") {
@@ -171,7 +180,7 @@ fn parsing(vec: Vec<Msg>, contkr: &mut TcpCon, matches: &ArgMatches) {
 fn main() {
     let matches = App::new(crate_name!()).setting(AppSettings::ArgRequiredElseHelp)
         .version(crate_version!())
-        .author("Willaim Fleming <wfleming@grumpysysadm.com>")
+        .author("amos <heyang.amos@gmail.com>")
         .about("parsing tool for tcp net")
         .arg(Arg::with_name("version")
             .short("V")
