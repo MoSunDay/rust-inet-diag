@@ -12,6 +12,11 @@ use std::process;
 use std::str;
 use std::net::Ipv4Addr;
 
+use rdkafka::config::ClientConfig;
+use rdkafka::producer::{FutureProducer, FutureRecord};
+use futures::FutureExt;
+use config::{Config, File};
+
 pub const AF_INET: u8 = 2;
 pub const AF_INET6: u8 = 3;
 pub const IPPROTO_TCP: u8 = 6;
@@ -32,28 +37,28 @@ pub struct InAddr {
     s_addr: u32
 }
 
-#[derive(RustcEncodable)]
-#[derive(Debug)]
-pub struct TcpCon {
-    pub tcp_established: i64,
-    pub tcp_syn_sent: i64,
-    pub tcp_syn_recv: i64,
-    pub tcp_fin_wait1: i64,
-    pub tcp_fin_wait2: i64,
-    pub tcp_time_wait: i64,
-    pub tcp_close: i64,
-    pub tcp_close_wait: i64,
-    pub tcp_last_ack: i64,
-    pub tcp_listen: i64,
-    pub tcp_closing: i64,
-    pub tcp_max_states: i64
-}
+// #[derive(RustcEncodable)]
+// #[derive(Debug)]
+// pub struct TcpCon {
+//     pub tcp_established: i64,
+//     pub tcp_syn_sent: i64,
+//     pub tcp_syn_recv: i64,
+//     pub tcp_fin_wait1: i64,
+//     pub tcp_fin_wait2: i64,
+//     pub tcp_time_wait: i64,
+//     pub tcp_close: i64,
+//     pub tcp_close_wait: i64,
+//     pub tcp_last_ack: i64,
+//     pub tcp_listen: i64,
+//     pub tcp_closing: i64,
+//     pub tcp_max_states: i64
+// }
 
-impl ::std::default::Default for TcpCon {
-    fn default() -> Self {
-        unsafe { ::std::mem::zeroed() }
-    }
-}
+// impl ::std::default::Default for TcpCon {
+//     fn default() -> Self {
+//         unsafe { ::std::mem::zeroed() }
+//     }
+// }
 
 
 #[derive(RustcEncodable, RustcDecodable)]
@@ -133,7 +138,7 @@ impl ::std::default::Default for InetDiagMsg {
     }
 }
 
-fn parsing(vec: Vec<Msg>, contkr: &mut TcpCon, matches: &ArgMatches) {
+fn parsing(vec: Vec<Msg>) {
     for reply in vec {
         match reply.bytes() {
             Ok(bytes) => {
@@ -143,28 +148,7 @@ fn parsing(vec: Vec<Msg>, contkr: &mut TcpCon, matches: &ArgMatches) {
                 let data = &bytes[OFFSET..SIZE];
                 match bincode::rustc_serialize::decode::<InetDiagMsg>(data) {
                     Ok(msg) => {
-                        if matches.is_present("connections") {
-                            if msg.state != 10 {
-                                println!("{}:{} -> {}:{}", Ipv4Addr::from(msg.id.src.0), msg.id.sport, Ipv4Addr::from(msg.id.dst.0), msg.id.dport);
-                            }
-                        }
-                        if matches.is_present("states") {
-                            match msg.state {
-                                1 => contkr.tcp_established += 1,
-                                2 => contkr.tcp_syn_sent += 1,
-                                3 => contkr.tcp_syn_recv += 1,
-                                4 => contkr.tcp_fin_wait1 += 1,
-                                5 => contkr.tcp_fin_wait2 += 1,
-                                6 => contkr.tcp_time_wait += 1,
-                                7 => contkr.tcp_close += 1,
-                                8 => contkr.tcp_close_wait += 1,
-                                9 => contkr.tcp_last_ack += 1,
-                                10 => contkr.tcp_listen += 1,
-                                11 => contkr.tcp_closing += 1,
-                                12 => contkr.tcp_max_states += 1,
-                                _ => println!("here be daemons...")
-                            }
-                        }
+                        println!("{}:{},{}:{}", Ipv4Addr::from(msg.id.src.0), msg.id.sport, Ipv4Addr::from(msg.id.dst.0), msg.id.dport);
                     },
                     Err(e) => eprintln!("An error occurred while decoding: {}", e),
                 }
@@ -186,19 +170,21 @@ fn main() {
             .short("V")
             .long("version")
             .help("print version info"))
-        .arg(Arg::with_name("connections")
-            .short("c")
-            .long("connections")
-            .multiple(true)
-            .help("prints connections"))
-        .arg(Arg::with_name("states")
-            .short("s")
-            .long("states")
+        .arg(Arg::with_name("tracker")
+            .short("t")
+            .long("tracker")
             .multiple(true)
             .help("prints summary in json")).get_matches();
+
     if matches.is_present("version") {
         println!("rnstat version {}", crate_version!())
     }
+
+    if !matches.is_present("tracker") {
+        println!("usage: -t or --tracker");
+        std::process::exit(0);
+    }
+    
     let mut nl_sock = Socket::new(Protocol::INETDiag).unwrap();
     let nl_sock_addr = NetlinkAddr::new(0, 0);
     let payload = InetDiagV2 { family: AF_INET, protocol: IPPROTO_TCP, states: TCPF_ALL, id: InetDiagSocketID { ..Default::default() }, ..Default::default() };
@@ -206,15 +192,36 @@ fn main() {
     let mut shdr = NlMsgHeader::user_defined(20, 56);
     shdr.data_length(56).seq(178431).pid(0).dump();
     let msg = Msg::new(shdr, Payload::Data(&gen_bytes));
-    let mut contkr = TcpCon { ..Default::default() };
+    // let mut contkr = TcpCon { ..Default::default() };
     nl_sock.send(msg, &nl_sock_addr);
     
+    let mut settings = Config::default();
+    settings
+        .merge(File::with_name("Settings"))
+        .expect("Unable to load config file");
+
+    let bootstrap_servers = settings
+        .get_str("kafka_producer.bootstrap_servers")
+        .unwrap();
+    let message_timeout_ms = settings
+        .get_str("kafka_producer.message_timeout_ms")
+        .unwrap();
+    let topic = settings
+        .get_str("kafka_producer.topic")
+        .unwrap();
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &bootstrap_servers)
+        .set("message.timeout.ms", &message_timeout_ms)
+        .create()
+        .expect("Producer creation error");
+
     loop {
         let result = nl_sock.recv();
         match result {
             Ok((addr, vec)) => {
                 if vec.len() != 0 {
-                    parsing(vec, &mut contkr, &matches);
+                    parsing(vec);
                 } else {
                     break
                 }
@@ -224,6 +231,18 @@ fn main() {
                 eprintln!("Error: {}", error);
                 break;
             },
+        }
+
+        // todo: buffer and batch send
+        let record = FutureRecord::to(&topic)
+        .payload("Hello, Kafka!");
+        match producer.send(record, 0).await {
+            Ok(delivery) => {
+                println!("Message delivered to {:?}", delivery);
+            }
+            Err((error, _)) => {
+                println!("Failed to deliver message: {}", error);
+            }
         }
     }
 }
